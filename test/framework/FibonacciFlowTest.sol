@@ -35,6 +35,24 @@ contract FibonacciFlowTest is Test {
 
     /// @notice Get proof data from proof_fib_2.json
     function getFib2Proof() internal pure returns (ProofParser.Proof memory proof) {
+        uint32[] memory coeffs0 = new uint32[](32);
+        uint32[] memory coeffs1 = new uint32[](32);
+        uint32[] memory coeffs2 = new uint32[](32);
+        uint32[] memory coeffs3 = new uint32[](32);
+        for (uint256 i = 0; i < 32; i++) {
+            coeffs0[i] = 0;
+            coeffs1[i] = 0;
+            coeffs2[i] = 0;
+            coeffs3[i] = 0;
+        }
+
+
+        proof.compositionPoly = ProofParser.CompositionPoly({
+            coeffs0: coeffs0,
+            coeffs1: coeffs1,
+            coeffs2: coeffs2,
+            coeffs3: coeffs3
+        });
         // Config from proof_fib_2.json
         proof.config.powBits = 10;
         proof.config.friConfig.logBlowupFactor = 1;

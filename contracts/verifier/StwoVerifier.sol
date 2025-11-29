@@ -15,6 +15,7 @@ import "../core/CirclePoint.sol";
 import "../fields/QM31Field.sol";
 import "../vcs/MerkleVerifier.sol";
 import "./ProofParser.sol";
+import "../secure_poly/SecureCirclePoly.sol";
 
 /// @title STWOVerifier
 /// @notice Generic STARK verifier for any AIR implementation
@@ -84,9 +85,13 @@ contract STWOVerifier {
     ) external returns (bool) {
         require(params.evaluator != address(0), "Invalid evaluator address");
 
+
+        SecureCirclePoly.SecurePoly memory poly = SecureCirclePoly.createSecurePoly(
+            proof.compositionPoly.coeffs0, proof.compositionPoly.coeffs1, proof.compositionPoly.coeffs2, proof.compositionPoly.coeffs3
+        );
+
         // Get evaluator and verify interface
         IFrameworkEval evaluator = IFrameworkEval(params.evaluator);
-        uint32 logSize = evaluator.logSize();
 
         // Initialize channel and commitment scheme (resets state for each verification)
         // NOTE: digest and nDraws should already include preprocessed and trace commitments
@@ -157,20 +162,15 @@ contract STWOVerifier {
             bool extractSuccess
         ) = ProofParser.extractCompositionOodsEval(proof);
         require(extractSuccess, "Failed to extract composition OODS eval");
-
-        uint256 gas_before_oods = gasleft();
+        uint256 gas_before = gasleft();
         bool oodsValid = _verifyOods(
-            _componentState,
-            proof.sampledValues,
             oodsPoint,
-            randomCoeff,
-            compositionOodsEval
+            compositionOodsEval,
+            poly
         );
-        uint256 gas_after_oods = gasleft();
-        console.log(
-            "OODS verification gas used: %d",
-            gas_before_oods - gas_after_oods
-        );
+        uint256 gas_after = gasleft();
+        console.log("Gas used for OODS verification:", gas_before - gas_after);
+
         if (!oodsValid) {
             return false;
         }
@@ -223,7 +223,7 @@ contract STWOVerifier {
         // =============================================================================
         // PHASE 8: FRI Decommitment (PCS Verification)
         // =============================================================================
-        console.log("Starting FRI verification...");
+
         bool friValid = _verifyFri(
             proof.friProof,
             proof.config.friConfig,
@@ -497,29 +497,17 @@ contract STWOVerifier {
     /// @notice Verify OODS (out-of-domain sampling) values
     /// @dev Checks that claimed evaluations match the constraint polynomial
     function _verifyOods(
-        FrameworkComponentLib.ComponentState storage componentState,
-        QM31Field.QM31[][][] memory sampledValues,
         CirclePoint.Point memory oodsPoint,
-        QM31Field.QM31 memory randomCoeff,
-        QM31Field.QM31 memory compositionPodsEval
+        QM31Field.QM31 memory compositionOodsEval,
+        SecureCirclePoly.SecurePoly memory poly
     ) internal returns (bool) {
-        // 1. Initialize point evaluation accumulator
-        PointEvaluationAccumulator.Accumulator
-            memory eval_accumulator = PointEvaluationAccumulator.newAccumulator(
-                randomCoeff
-            );
-        // 2. Accumulate sampled values with random coefficient
-        PointEvaluationAccumulator.Accumulator memory result = componentState
-            .evaluateConstraintQuotientsAtPoint(
-                oodsPoint,
-                sampledValues,
-                eval_accumulator
-            );
-        QM31Field.QM31 memory finalResult = result.accumulation;
-
+   
+    
+        QM31Field.QM31 memory finalResult = SecureCirclePoly.evalAtPoint(poly, oodsPoint);
+        
         // 3. Verify constraint evaluations
         require(
-            QM31Field.eq(finalResult, compositionPodsEval),
+            QM31Field.eq(finalResult, compositionOodsEval),
             "OODS values do not match"
         );
         return true;
@@ -561,11 +549,10 @@ contract STWOVerifier {
             queryPositions
         );
 
+
         if (!merkleVerificationSuccess) {
             return false;
         }
-        
-
 
         // Answer FRI queries (equivalent to fri_answers call)
         uint32[][][] memory nColumnsPerLogSizeData = getNColumnsPerLogSize(

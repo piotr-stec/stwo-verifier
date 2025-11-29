@@ -21,6 +21,14 @@ library ProofParser {
         uint32[][] queriedValues;
         uint64 proofOfWork;
         FriVerifier.FriProof friProof;
+        CompositionPoly compositionPoly;
+    }
+
+    struct CompositionPoly {
+        uint32[] coeffs0;
+        uint32[] coeffs1;
+        uint32[] coeffs2;
+        uint32[] coeffs3;
     }
 
     /// @notice Parse commitments from uint8[][] to bytes32[]
