@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "../fields/M31Field.sol";
+import "forge-std/console.sol";
 
 /// @title MerkleVerifier
 /// @notice Verifies Merkle tree decommitments for vector commitment schemes
@@ -393,7 +394,10 @@ library MerkleVerifier {
         uint256 layerQueryIndex = 0;
         
         while (iterators.prevLayerIndex < previousLayerHashes.length || layerQueryIndex < layerQueries.length) {
-            uint256 nodeIndex = _getNextNodeIndex(
+            // Determine next node and whether it's from current layer queries
+            bool isFromLayerQuery;
+            uint256 nodeIndex;
+            (nodeIndex, isFromLayerQuery) = _getNextNodeIndexAndSource(
                 layerQueries,
                 previousLayerHashes,
                 iterators.prevLayerIndex,
@@ -408,7 +412,7 @@ library MerkleVerifier {
             // Get node hashes and values
             (bytes32 nodeHash, uint256 newLayerQueryIndex) = _processNode(
                 nodeIndex,
-                layerQueries,
+                isFromLayerQuery,
                 layerQueryIndex,
                 previousLayerHashes,
                 nColumnsInLayer,
@@ -430,28 +434,40 @@ library MerkleVerifier {
         return (tempLayerHashes, layerHashCount);
     }
 
-    /// @notice Get next node index to process
-    function _getNextNodeIndex(
+    /// @notice Get next node index to process and its source
+    /// @return nodeIndex The next node index to process
+    /// @return isFromLayerQuery True if node comes from current layer queries, false if from previous layer parents
+    function _getNextNodeIndexAndSource(
         uint256[] memory layerQueries,
         LayerHash[] memory previousLayerHashes,
         uint256 prevLayerIndex,
         uint256 layerQueryIndex
-    ) internal pure returns (uint256) {
+    ) internal pure returns (uint256, bool) {
         if (prevLayerIndex >= previousLayerHashes.length) {
-            return layerQueries[layerQueryIndex];
+            // Only layer queries remain
+            return (layerQueries[layerQueryIndex], true);
         } else if (layerQueryIndex >= layerQueries.length) {
-            return previousLayerHashes[prevLayerIndex].nodeIndex / 2;
+            // Only previous layer parents remain
+            return (previousLayerHashes[prevLayerIndex].nodeIndex / 2, false);
         } else {
+            // Both sources available - take minimum
             uint256 prevNodeIndex = previousLayerHashes[prevLayerIndex].nodeIndex / 2;
             uint256 queryNodeIndex = layerQueries[layerQueryIndex];
-            return prevNodeIndex < queryNodeIndex ? prevNodeIndex : queryNodeIndex;
+            if (prevNodeIndex < queryNodeIndex) {
+                return (prevNodeIndex, false);
+            } else if (queryNodeIndex < prevNodeIndex) {
+                return (queryNodeIndex, true);
+            } else {
+                // Same node index from both sources - it's a queried node
+                return (queryNodeIndex, true);
+            }
         }
     }
 
     /// @notice Process single node and return hash
     function _processNode(
         uint256 nodeIndex,
-        uint256[] memory layerQueries,
+        bool isFromLayerQuery,
         uint256 layerQueryIndex,
         LayerHash[] memory previousLayerHashes,
         uint256 nColumnsInLayer,
@@ -469,9 +485,8 @@ library MerkleVerifier {
             hasChildren
         );
 
-        // Get column values
-        bool isQueriedNode = (layerQueryIndex < layerQueries.length && 
-                            layerQueries[layerQueryIndex] == nodeIndex);
+        // Node is queried only if it comes from current layer queries
+        bool isQueriedNode = isFromLayerQuery;
         
         uint32[] memory nodeValues = _getNodeValues(
             isQueriedNode,

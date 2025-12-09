@@ -13,7 +13,6 @@ import "../framework/PointEvaluatorLib.sol";
 import "../framework/TreeSubspan.sol";
 import "../framework/TreeVecExtensions.sol";
 import "./TraceLocationAllocatorLib.sol";
-import "forge-std/console.sol";
 
 /// @title FrameworkComponentLib
 /// @notice Library implementing FrameworkComponent functionality for gas optimization
@@ -51,19 +50,15 @@ library FrameworkComponentLib {
 
     /// @notice Component information structure
     struct ComponentInfo {
-        uint256 nConstraints;
         uint32 maxConstraintLogDegreeBound;
         uint32 logSize;
-        string componentName;
-        string description;
         int32[][][] maskOffsets; // Mask offsets: [tree][column][offset_values] from InfoEvaluator
         uint256[] preprocessedColumns; // Preprocessed column IDs
     }
 
     /// @notice Framework component state
     struct ComponentState {
-        /// @notice The evaluator implementing FrameworkEval
-        address eval;
+        uint32 logSize;
         /// @notice Trace locations allocated for this component
         TreeSubspan.Subspan[] traceLocations;
         /// @notice Preprocessed column indices
@@ -80,34 +75,17 @@ library FrameworkComponentLib {
     // Library Functions
     // =============================================================================
 
-    /// @notice Create component state from precomputed ComponentInfo
-    /// @dev Instead of evaluating an InfoEvaluator on-chain, accept precomputed
-    ///      ComponentInfo (mask offsets, preprocessed columns, etc.) and use it to
-    ///      allocate trace locations and initialize the component state.
-    /// @param state Component state (will be initialized)
-    /// @param allocator Location allocator (will be modified)
-    /// @param evaluatorAddr Address of IFrameworkEval implementation (stored in state)
-    /// @param claimedSum Claimed sum for logup constraints
-    /// @param info Precomputed ComponentInfo (maskOffsets, preprocessedColumns, etc.)
-    /// @return traceLocations Allocated trace locations
-    /// @return preprocessedColumnIndices Indices of preprocessed columns
-    /// @return returnedInfo The same ComponentInfo that was passed in
     function createComponent(
-        ComponentState storage state,
         TraceLocationAllocatorLib.AllocatorState storage allocator,
-        address evaluatorAddr,
+        uint32 logSize,
         QM31Field.QM31 memory claimedSum,
         ComponentInfo memory info
     )
         external
         returns (
-            TreeSubspan.Subspan[] memory traceLocations,
-            uint256[] memory preprocessedColumnIndices,
-            ComponentInfo memory returnedInfo
+            ComponentState memory stateUpdated
         )
     {
-        require(evaluatorAddr != address(0), "Invalid evaluator address");
-
         // Convert mask_offsets structure to column counts for allocator
         // Rust: location_allocator.next_for_structure(&info.mask_offsets)
         // where mask_offsets is TreeVec<ColumnVec<Vec<isize>>>
@@ -117,46 +95,40 @@ library FrameworkComponentLib {
             treeStructure[i] = info.maskOffsets[i].length; // Number of columns in this tree
         }
 
+        
         // Allocate trace locations based on tree structure
-        traceLocations = allocator.nextForStructure(
+        TreeSubspan.Subspan[] memory traceLocations = allocator.nextForStructure(
             treeStructure,
             ORIGINAL_TRACE_IDX
         );
 
         // Build preprocessed column indices from provided preprocessedColumns
-        preprocessedColumnIndices = _getPreprocessedColumnIndices(
+        uint256[] memory preprocessedColumnIndices = _getPreprocessedColumnIndices(
             allocator,
             info.preprocessedColumns
         );
 
         // Initialize component state inline (no forward-call to initialize)
-        require(!state.isInitialized, "Component already initialized");
+        require(!stateUpdated.isInitialized, "Component already initialized");
         require(traceLocations.length > 0, "No trace locations provided");
         require(info.logSize > 0, "Invalid log size");
-        require(info.nConstraints > 0, "No constraints defined");
 
-        state.eval = evaluatorAddr;
-        state.claimedSum = claimedSum;
-        state.info = info;
-        state.isInitialized = true;
+        stateUpdated.logSize = logSize;
+        stateUpdated.claimedSum = claimedSum;
+        stateUpdated.info = info;
+        stateUpdated.isInitialized = true;
 
-        // Store trace locations
-        delete state.traceLocations;
-        for (uint256 i = 0; i < traceLocations.length; i++) {
-            state.traceLocations.push(traceLocations[i]);
-        }
+        // Set trace locations (no push needed for memory arrays)
+        stateUpdated.traceLocations = traceLocations;
 
-        // Store preprocessed column indices
-        delete state.preprocessedColumnIndices;
-        for (uint256 i = 0; i < preprocessedColumnIndices.length; i++) {
-            state.preprocessedColumnIndices.push(preprocessedColumnIndices[i]);
-        }
+        // Set preprocessed column indices  
+        stateUpdated.preprocessedColumnIndices = preprocessedColumnIndices;
 
-        returnedInfo = info;
     }
 
     /// @notice Get preprocessed column indices
-    /// @dev Matches the preprocessed_column_indices logic in Rust
+    /// @dev Maps Rust logic: allocator mapping preprocessed columns to their indices
+    /// Rust: info.preprocessed_columns.iter().map(|col| { let next_column = ...; if let Some(pos) = ... })
     function _getPreprocessedColumnIndices(
         TraceLocationAllocatorLib.AllocatorState storage allocator,
         uint256[] memory preprocessedColumns
@@ -164,35 +136,73 @@ library FrameworkComponentLib {
         indices = new uint256[](preprocessedColumns.length);
 
         for (uint256 i = 0; i < preprocessedColumns.length; i++) {
-            // TODO: Implement column lookup/allocation
-            // For now, just return the column index
-            indices[i] = preprocessedColumns[i];
+            uint256 columnId = preprocessedColumns[i];
+            
+            // Get current length for next_column equivalent
+            uint256 nextColumn = TraceLocationAllocatorLib.getPreprocessedColumnsLength(allocator);
+            
+            // Try to find existing column position
+            // Rust: location_allocator.preprocessed_columns.iter().position(|x| x.id == col.id)
+            (bool found, uint256 position) = TraceLocationAllocatorLib.findPreprocessedColumn(allocator, columnId);
+            
+            if (found) {
+                // Column already exists, use its position
+                indices[i] = position;
+            } else {
+                // Check allocation mode
+                // Rust: if matches!(location_allocator.preprocessed_columns_allocation_mode, Static)
+                require(!TraceLocationAllocatorLib.isStaticAllocationMode(allocator), 
+                    string(abi.encodePacked("Preprocessed column ", _toString(columnId), " is missing from static allocation")));
+                
+                // Dynamic mode: add new column
+                // Rust: location_allocator.preprocessed_columns.push(col.clone());
+                TraceLocationAllocatorLib.addPreprocessedColumn(allocator, columnId);
+                indices[i] = nextColumn;
+            }
         }
+    }
+
+    /// @notice Convert uint256 to string for error messages
+    function _toString(uint256 value) private pure returns (string memory) {
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
     }
 
     /// @notice Initialize framework component state
     /// @dev Maps to: FrameworkComponent::new(location_allocator, eval, claimed_sum)
     /// @param state The component state to initialize
-    /// @param _eval Framework evaluator implementing IFrameworkEval
+    /// @param logSize Log size of the trace
     /// @param _traceLocations Allocated trace locations
     /// @param _preprocessedColumnIndices Indices of preprocessed columns
     /// @param _claimedSum Claimed sum for logup constraints
     /// @param _componentInfo Component metadata
     function initialize(
         ComponentState storage state,
-        address _eval,
+        uint32 logSize,
         TreeSubspan.Subspan[] memory _traceLocations,
         uint256[] memory _preprocessedColumnIndices,
         QM31Field.QM31 memory _claimedSum,
         ComponentInfo memory _componentInfo
     ) external {
         require(!state.isInitialized, "Component already initialized");
-        require(_eval != address(0), "Invalid evaluator address");
         require(_traceLocations.length > 0, "No trace locations provided");
         require(_componentInfo.logSize > 0, "Invalid log size");
-        require(_componentInfo.nConstraints > 0, "No constraints defined");
 
-        state.eval = _eval;
+        state.logSize = logSize;
         state.claimedSum = _claimedSum;
         state.info = _componentInfo;
         state.isInitialized = true;
@@ -208,16 +218,6 @@ library FrameworkComponentLib {
         for (uint256 i = 0; i < _preprocessedColumnIndices.length; i++) {
             state.preprocessedColumnIndices.push(_preprocessedColumnIndices[i]);
         }
-    }
-
-    /// @notice Get number of constraints
-    /// @param state The component state
-    /// @return nConstraints_ Number of constraints
-    function nConstraints(
-        ComponentState storage state
-    ) external view returns (uint256 nConstraints_) {
-        require(state.isInitialized, "Component not initialized");
-        return state.info.nConstraints;
     }
 
     /// @notice Get maximum constraint log degree bound
@@ -276,8 +276,9 @@ library FrameworkComponentLib {
         // Rust: let trace_step = CanonicCoset::new(self.eval.log_size()).step();
         CanonicCosetM31.CanonicCosetStruct
             memory canonicCosetM31 = CanonicCosetM31.newCanonicCoset(
-                IFrameworkEval(state.eval).logSize()
+                state.logSize
             );
+
         CirclePointM31.Point memory traceStepM31 = CanonicCosetM31.step(
             canonicCosetM31
         );
@@ -311,7 +312,7 @@ library FrameworkComponentLib {
 
             if (treeIdx < nTrees) {
                 uint256 numCols = location.size();
-
+                
                 // Ensure tree has enough space
                 if (samplePoints.points[treeIdx].length < location.colEnd) {
                     CirclePoint.Point[][]
@@ -391,6 +392,11 @@ library FrameworkComponentLib {
                     }
                 }
             }
+
+        }
+
+      for (uint256 i = 0; i < samplePoints.points.length && i < 3; i++) {
+            console.log("samplePoints.points[", i, "].length:", samplePoints.points[i].length);
         }
 
         // Handle preprocessed columns (tree 0)
@@ -423,104 +429,6 @@ library FrameworkComponentLib {
         return state.preprocessedColumnIndices;
     }
 
-    /// @notice Evaluate constraint quotients at point
-    /// @param state The component state
-    /// @param point Evaluation point
-    /// @param mask Mask values
-    /// @param accumulator Point evaluation accumulator
-    /// @return updatedAccumulator Updated accumulator after evaluation
-    function evaluateConstraintQuotientsAtPoint(
-        ComponentState storage state,
-        CirclePoint.Point memory point,
-        QM31Field.QM31[][][] memory mask,
-        PointEvaluationAccumulator.Accumulator memory accumulator
-    )
-        external
-        returns (
-            PointEvaluationAccumulator.Accumulator memory updatedAccumulator
-        )
-    {
-        require(state.isInitialized, "Component not initialized");
-
-        // Step 1: Extract preprocessed mask
-        QM31Field.QM31[][] memory preprocessedMask = mask
-            .extractPreprocessedMask(
-                state.preprocessedColumnIndices,
-                PREPROCESSED_TRACE_IDX
-            );
-
-        // Step 2: Create sub-tree from mask using trace locations
-        QM31Field.QM31[][][] memory maskSubTree = mask.subTree(
-            state.traceLocations
-        );
-
-        // Step 3: Set preprocessed mask in sub-tree
-        maskSubTree = maskSubTree.setPreprocessedMask(
-            preprocessedMask,
-            PREPROCESSED_TRACE_IDX
-        );
-
-        // Step 4: Calculate vanishing polynomial inverse
-        CanonicCosetM31.CanonicCosetStruct memory canonicCoset = CanonicCosetM31
-            .newCanonicCoset(state.info.logSize);
-        CosetM31.CosetStruct memory underlyingCoset = CanonicCosetM31.coset(
-            canonicCoset
-        );
-
-        QM31Field.QM31 memory denomInverse = _calculateVanishingInverse(
-            underlyingCoset,
-            point
-        );
-
-        // Step 5: Use the accumulator directly (already correct type)
-        PointEvaluationAccumulator.Accumulator
-            memory pointAccumulator = accumulator;
-
-        // Step 6: Create PointEvaluator and evaluate constraints
-        PointEvaluatorLib.PointEvaluator
-            memory pointEvaluator = PointEvaluatorLib.create(
-                maskSubTree,
-                pointAccumulator,
-                denomInverse,
-                state.info.logSize,
-                state.claimedSum
-            );
-
-        // Step 7: Evaluate using the framework evaluator
-        PointEvaluatorLib.PointEvaluator
-            memory updatedEvaluator = IFrameworkEval(state.eval).evaluate(
-                pointEvaluator
-            );
-
-        // Step 8: Get updated accumulator from evaluator
-        PointEvaluationAccumulator.Accumulator
-            memory finalAccumulator = updatedEvaluator.evaluationAccumulator;
-
-        // Step 9: Return the updated accumulator (already correct type)
-        return finalAccumulator;
-    }
-
-    /// @notice Get component information
-    /// @param state The component state
-    /// @return componentId Unique component identifier
-    /// @return version Component version
-    /// @return description Component description
-    function getComponentInfo(
-        ComponentState storage state
-    )
-        external
-        view
-        returns (
-            bytes32 componentId,
-            uint256 version,
-            string memory description
-        )
-    {
-        require(state.isInitialized, "Component not initialized");
-        componentId = keccak256(bytes(state.info.componentName));
-        version = 1;
-        description = state.info.description;
-    }
 
     /// @notice Validate component configuration
     /// @param state The component state
@@ -532,15 +440,6 @@ library FrameworkComponentLib {
         return validateComponent(state);
     }
 
-    /// @notice Get the underlying evaluator address
-    /// @param state The component state
-    /// @return evaluator The framework evaluator address
-    function getEval(
-        ComponentState storage state
-    ) external view returns (address evaluator) {
-        require(state.isInitialized, "Component not initialized");
-        return state.eval;
-    }
 
     /// @notice Get trace locations
     /// @param state The component state
@@ -592,7 +491,7 @@ library FrameworkComponentLib {
         delete state.preprocessedColumnIndices;
 
         // Reset other fields
-        state.eval = address(0);
+        state.logSize = 0;
         state.claimedSum = QM31Field.zero();
         delete state.info;
         state.isInitialized = false;
@@ -614,18 +513,9 @@ library FrameworkComponentLib {
             return (false, "No trace locations allocated");
         }
 
-        // Check that evaluator is valid
-        if (state.eval == address(0)) {
-            return (false, "Invalid evaluator address");
-        }
-
         // Check that info is consistent
         if (state.info.logSize == 0) {
             return (false, "Invalid log size");
-        }
-
-        if (state.info.nConstraints == 0) {
-            return (false, "No constraints defined");
         }
 
         return (true, "Component validation passed");

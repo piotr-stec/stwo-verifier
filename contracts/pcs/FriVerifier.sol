@@ -291,9 +291,14 @@ library FriVerifier {
             revert LastLayerDegreeInvalid();
         }
 
+        console.log("channel before mix felts");
+        console.logBytes32(channelState.digest);
         // Mix last layer polynomial into channel
-        _mixQM31Array(channelState, proof.lastLayerPoly);
 
+        channelState.mixFelts(proof.lastLayerPoly);
+
+        console.log("channel after mix felts");
+        console.logBytes32(channelState.digest);
         // Initialize verifier state
         friVerifierState = FriVerifierState({
             config: config,
@@ -325,10 +330,19 @@ library FriVerifier {
         internal
         returns (QueryPositionsByLogSize memory queryPositionsByLogSize)
     {
+        console.log("=== sampleQueryPositions START ===");
+        console.log("Channel digest before sampling:");
+        console.logBytes32(channelState.digest);
+        
         // Collect unique column log sizes (equivalent to Rust BTreeSet)
         uint32[] memory columnLogSizes = _getUniqueColumnLogSizes(
             friVerifierState
         );
+
+        console.log("Unique column log sizes:", columnLogSizes.length);
+        for (uint256 i = 0; i < columnLogSizes.length; i++) {
+            console.log("  columnLogSize[", i, "]:", columnLogSizes[i]);
+        }
 
         // Find maximum column log size
         uint32 maxColumnLogSize = 0;
@@ -338,6 +352,9 @@ library FriVerifier {
             }
         }
 
+        console.log("maxColumnLogSize:", maxColumnLogSize);
+        console.log("nQueries:", friVerifierState.config.nQueries);
+
         // Generate queries (equivalent to Queries::generate)
         Queries memory queries = _generateQueries(
             channelState,
@@ -345,16 +362,30 @@ library FriVerifier {
             uint32(friVerifierState.config.nQueries)
         );
 
+        console.log("Generated queries.positions.length:", queries.positions.length);
+        console.log("First 10 query positions:");
+        for (uint256 i = 0; i < queries.positions.length && i < 10; i++) {
+            console.log("  query[", i, "]:", queries.positions[i]);
+        }
+
         // Get query positions by log size (equivalent to get_query_positions_by_log_size)
         queryPositionsByLogSize = _getQueryPositionsByLogSize(
             queries,
             columnLogSizes
         );
 
+        console.log("Query positions by log size:");
+        for (uint256 i = 0; i < queryPositionsByLogSize.logSizes.length; i++) {
+            console.log("  LogSize:", queryPositionsByLogSize.logSizes[i], 
+                       "Count:", queryPositionsByLogSize.queryPositions[i].length);
+        }
+
         // Store in verifier state
         friVerifierState.queries = queries;
         friVerifierState.queryPositionsByLogSize = queryPositionsByLogSize;
         friVerifierState.queriesSampled = true;
+        
+        console.log("=== sampleQueryPositions END ===");
     }
 
     /// @notice Mix QM31 array into channel
@@ -489,40 +520,33 @@ library FriVerifier {
         uint32 logDomainSize,
         uint32 nQueries
     ) private returns (Queries memory queries) {
-        uint256 maxQuery = (1 << logDomainSize) - 1;
-        uint256[] memory uniqueQueries = new uint256[](nQueries);
-        uint256 queriesFound = 0;
 
-        // Use simple approach since we expect nQueries << domain size
-        // In practice, duplicates are very rare for reasonable parameters
-        while (queriesFound < nQueries) {
+        uint256 maxQuery = (1 << logDomainSize) - 1;
+        
+        // CRITICAL: Draw EXACTLY nQueries values (not unique count!)
+        // This matches Rust behavior where BTreeSet.insert() is called nQueries times
+        // even if some inserts are duplicates
+        uint256[] memory drawnQueries = new uint256[](nQueries);
+        uint256 queryDrawCount = 0;
+        uint256 drawCallCount = 0;
+        
+        while (queryDrawCount < nQueries) {
             uint32[] memory randomWords = channelState.drawU32s();
 
             for (
                 uint256 i = 0;
-                i < randomWords.length && queriesFound < nQueries;
+                i < randomWords.length && queryDrawCount < nQueries;
                 i++
             ) {
                 uint256 candidateQuery = randomWords[i] & maxQuery;
-
-                // Check if this query is already present (simple linear search)
-                bool isDuplicate = false;
-                for (uint256 j = 0; j < queriesFound; j++) {
-                    if (uniqueQueries[j] == candidateQuery) {
-                        isDuplicate = true;
-                        break;
-                    }
-                }
-
-                if (!isDuplicate) {
-                    uniqueQueries[queriesFound] = candidateQuery;
-                    queriesFound++;
-                }
+                drawnQueries[queryDrawCount] = candidateQuery;
+                queryDrawCount++;
             }
+            drawCallCount++;
         }
 
-        // Sort the queries (equivalent to BTreeSet ordering)
-        _sortUint256Array(uniqueQueries);
+        // Now deduplicate and sort (mimics BTreeSet behavior)
+        uint256[] memory uniqueQueries = _deduplicateAndSort(drawnQueries);
 
         queries = Queries({
             positions: uniqueQueries,
@@ -606,6 +630,41 @@ library FriVerifier {
                 }
             }
         }
+    }
+
+    /// @notice Deduplicate and sort uint256 array
+    /// @dev Mimics Rust BTreeSet behavior: sorts and removes duplicates
+    /// @param arr Array potentially with duplicates
+    /// @return deduplicated Sorted array without duplicates
+    function _deduplicateAndSort(uint256[] memory arr) private pure returns (uint256[] memory) {
+        if (arr.length == 0) {
+            return arr;
+        }
+        
+        // First sort
+        _sortUint256Array(arr);
+        
+        // Count unique elements
+        uint256 uniqueCount = 1;
+        for (uint256 i = 1; i < arr.length; i++) {
+            if (arr[i] != arr[i-1]) {
+                uniqueCount++;
+            }
+        }
+        
+        // Create deduplicated array
+        uint256[] memory deduplicated = new uint256[](uniqueCount);
+        deduplicated[0] = arr[0];
+        uint256 writeIdx = 1;
+        
+        for (uint256 i = 1; i < arr.length; i++) {
+            if (arr[i] != arr[i-1]) {
+                deduplicated[writeIdx] = arr[i];
+                writeIdx++;
+            }
+        }
+        
+        return deduplicated;
     }
 
     /// @notice Remove consecutive duplicates from sorted uint32 array

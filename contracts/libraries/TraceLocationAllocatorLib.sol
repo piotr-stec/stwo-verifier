@@ -359,6 +359,7 @@ library TraceLocationAllocatorLib {
         if (state.preprocessedColumnsAllocationMode == PreprocessedColumnsAllocationMode.Dynamic) {
             delete state.preprocessedColumns;
         }
+        state.isInitialized = false;
     }
 
     /// @notice Check if allocator is initialized
@@ -366,5 +367,122 @@ library TraceLocationAllocatorLib {
     /// @return initialized True if allocator is initialized
     function isInitialized(AllocatorState storage state) external view returns (bool initialized) {
         return state.isInitialized;
+    }
+
+    /// @notice Get number of preprocessed columns
+    /// @param state The allocator state
+    /// @return length Number of preprocessed columns
+    function getPreprocessedColumnsLength(AllocatorState storage state) 
+        external view returns (uint256 length) {
+        return state.preprocessedColumns.length;
+    }
+
+    /// @notice Find preprocessed column by ID
+    /// @dev Rust: location_allocator.preprocessed_columns.iter().position(|x| x.id == col.id)
+    /// @param state The allocator state
+    /// @param columnId The column ID to find
+    /// @return found Whether column was found
+    /// @return position Position/index of the column if found
+    function findPreprocessedColumn(AllocatorState storage state, uint256 columnId) 
+        external view returns (bool found, uint256 position) {
+        string memory columnIdStr = _uint256ToString(columnId);
+        
+        for (uint256 i = 0; i < state.preprocessedColumns.length; i++) {
+            if (keccak256(bytes(state.preprocessedColumns[i].id)) == keccak256(bytes(columnIdStr))) {
+                return (true, i);
+            }
+        }
+        return (false, 0);
+    }
+
+    /// @notice Check if allocator is in static allocation mode
+    /// @dev Rust: matches!(location_allocator.preprocessed_columns_allocation_mode, Static)
+    /// @param state The allocator state
+    /// @return isStatic True if in static mode
+    function isStaticAllocationMode(AllocatorState storage state) 
+        external view returns (bool isStatic) {
+        return state.preprocessedColumnsAllocationMode == PreprocessedColumnsAllocationMode.Static;
+    }
+
+    /// @notice Add preprocessed column
+    /// @dev Rust: location_allocator.preprocessed_columns.push(col.clone())
+    /// @param state The allocator state
+    /// @param columnId The column ID to add
+    function addPreprocessedColumn(AllocatorState storage state, uint256 columnId) external {
+        require(state.isInitialized, "Allocator not initialized");
+        require(
+            state.preprocessedColumnsAllocationMode == PreprocessedColumnsAllocationMode.Dynamic,
+            "Cannot add columns in static allocation mode"
+        );
+
+        string memory columnIdStr = _uint256ToString(columnId);
+        
+        // Check for duplicates
+        for (uint256 i = 0; i < state.preprocessedColumns.length; i++) {
+            require(
+                keccak256(bytes(state.preprocessedColumns[i].id)) != keccak256(bytes(columnIdStr)),
+                "Duplicate preprocessed column not allowed"
+            );
+        }
+
+        // Add new preprocessed column
+        state.preprocessedColumns.push(PreProcessedColumnId({
+            id: columnIdStr,
+            logSize: 0, // Default log size
+            description: string(abi.encodePacked("Column ", columnIdStr))
+        }));
+    }
+
+    /// @notice Create allocator with static preprocessed columns
+    /// @dev Rust: TraceLocationAllocator::new_with_preprocessed_columns
+    /// @param state The allocator state to initialize
+    /// @param columnIds Array of column IDs
+    function initializeWithPreprocessedColumns(
+        AllocatorState storage state, 
+        uint256[] memory columnIds
+    ) external {
+        require(!state.isInitialized, "Allocator already initialized");
+
+        // Check for duplicates
+        for (uint256 i = 0; i < columnIds.length; i++) {
+            for (uint256 j = i + 1; j < columnIds.length; j++) {
+                require(columnIds[i] != columnIds[j], "Duplicate preprocessed columns not allowed");
+            }
+        }
+
+        // Set up static allocation mode
+        state.preprocessedColumnsAllocationMode = PreprocessedColumnsAllocationMode.Static;
+        
+        // Add all columns
+        for (uint256 i = 0; i < columnIds.length; i++) {
+            string memory columnIdStr = _uint256ToString(columnIds[i]);
+            state.preprocessedColumns.push(PreProcessedColumnId({
+                id: columnIdStr,
+                logSize: 0,
+                description: string(abi.encodePacked("Static column ", columnIdStr))
+            }));
+        }
+
+        state.isInitialized = true;
+    }
+
+    /// @notice Convert uint256 to string
+    function _uint256ToString(uint256 value) private pure returns (string memory) {
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
     }
 }
