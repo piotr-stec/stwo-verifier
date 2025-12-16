@@ -1418,7 +1418,7 @@ library FriVerifier {
     function decommit(
         FriVerifierState memory friVerifierState,
         QM31Field.QM31[][] memory firstLayerQueryEvals
-    ) internal pure returns (bool success) {
+    ) internal view returns (bool success) {
         // Ensure queries were sampled
         if (!friVerifierState.queriesSampled) {
             revert("Queries not sampled");
@@ -1442,7 +1442,7 @@ library FriVerifier {
         FriVerifierState memory friVerifierState,
         Queries memory queries,
         QM31Field.QM31[][] memory firstLayerQueryEvals
-    ) internal pure returns (bool success) {
+    ) internal view returns (bool success) {
                 console.log("first layer begin");
 
         // Step 1: Verify first layer and get sparse evaluations
