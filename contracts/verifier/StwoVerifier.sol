@@ -92,14 +92,19 @@ contract STWOVerifier {
         uint32 nDraws
     ) external returns (bool) {
         uint256 gas_start = gasleft();
-        console.log("Verifying STWO proof...");
+        console.log("=== STWO PROOF VERIFICATION START ===");
+        console.log("Initial gas:", gas_start);
+        
+        uint256 gas_before_poly = gasleft();
         SecureCirclePoly.SecurePoly memory poly = SecureCirclePoly.createSecurePoly(
             proof.compositionPoly.coeffs0, proof.compositionPoly.coeffs1, proof.compositionPoly.coeffs2, proof.compositionPoly.coeffs3
         );
-        console.log("xd1.");
+        uint256 gas_after_poly = gasleft();
+        console.log("Gas for SecurePoly creation:", gas_before_poly - gas_after_poly);
 
         // Initialize channel and commitment scheme (resets state for each verification)
         // NOTE: digest and nDraws should already include preprocessed and trace commitments
+        uint256 gas_before_init = gasleft();
         KeccakChannelLib.initializeWith(_channel, digest, nDraws);
         CommitmentSchemeVerifierLib.initialize(
             _commitmentScheme,
@@ -107,17 +112,23 @@ contract STWOVerifier {
             treeRoots,
             treeColumnLogSizes
         );
+        uint256 gas_after_init = gasleft();
+        console.log("Gas for initialization (channel + commitment):", gas_before_init - gas_after_init);
 
         // =============================================================================
         // PHASE 2: Draw Random Coefficient (Interaction Phase)
         // =============================================================================
 
+        uint256 gas_before_random = gasleft();
         QM31Field.QM31 memory randomCoeff = _channel.drawSecureFelt();
+        uint256 gas_after_random = gasleft();
+        console.log("Gas for drawing random coefficient:", gas_before_random - gas_after_random);
 
         // =============================================================================
         // PHASE 3: Composition Polynomial Commitment
         // =============================================================================
 
+        uint256 gas_before_commit = gasleft();
         uint32[] memory compositionSizes = new uint32[](4); // SECURE_EXTENSION_DEGREE
         for (uint256 i = 0; i < 4; i++) {
             compositionSizes[i] = params.componentsCompositionLogDegreeBound;
@@ -128,97 +139,138 @@ contract STWOVerifier {
             compositionSizes,
             _channel
         );
+        uint256 gas_after_commit = gasleft();
+        console.log("Gas for composition polynomial commitment:", gas_before_commit - gas_after_commit);
 
         // =============================================================================
         // PHASE 4: Draw OODS Point
         // =============================================================================
 
+        uint256 gas_before_oods_point = gasleft();
         CirclePoint.Point memory oodsPoint = CirclePoint
             .getRandomPointFromState(_channel);
+        uint256 gas_after_oods_point = gasleft();
+        console.log("Gas for drawing OODS point:", gas_before_oods_point - gas_after_oods_point);
 
         // =============================================================================
         // PHASE 5: Compute Mask Points and Sample Points
         // =============================================================================
 
+        uint256 gas_before_sample_points = gasleft();
         ComponentsLib.TreeVecMaskPoints
             memory samplePoints = _computeSamplePoints(
                 oodsPoint,
                 proof.commitments.length - 1, // Exclude composition commitment (it's added internally)
                 params
             );
+        uint256 gas_after_sample_points = gasleft();
+        console.log("Gas for computing sample points:", gas_before_sample_points - gas_after_sample_points);
 
 
         // =============================================================================
         // PHASE 6: Verify OODS Values (Out-of-Domain Sampling)
         // =============================================================================
 
+        uint256 gas_before_extract_oods = gasleft();
         // Extract composition OODS evaluation from proof
         (
             QM31Field.QM31 memory compositionOodsEval,
             bool extractSuccess
         ) = ProofParser.extractCompositionOodsEval(proof);
         require(extractSuccess, "Failed to extract composition OODS eval");
-        uint256 gas_before = gasleft();
+        uint256 gas_after_extract_oods = gasleft();
+        console.log("Gas for extracting composition OODS eval:", gas_before_extract_oods - gas_after_extract_oods);
+        
+        uint256 gas_before_oods_verify = gasleft();
         bool oodsValid = _verifyOods(
             oodsPoint,
             compositionOodsEval,
             poly
         );
-        uint256 gas_after = gasleft();
-        console.log("Gas used for OODS verification:", gas_before - gas_after);
+        uint256 gas_after_oods_verify = gasleft();
+        console.log("Gas for OODS verification:", gas_before_oods_verify - gas_after_oods_verify);
 
         if (!oodsValid) {
+            console.log("OODS verification failed!");
             return false;
         }
 
         // Mix felts and generate random coeff
+        uint256 gas_before_flatten = gasleft();
         QM31Field.QM31[] memory flattenedSampledValues = ProofParser
             .flattenCols(proof.sampledValues);
+        uint256 gas_after_flatten = gasleft();
+        console.log("Gas for flattening sampled values:", gas_before_flatten - gas_after_flatten);
+        
+        uint256 gas_before_mix = gasleft();
         _channel.mixFelts(flattenedSampledValues);
+        uint256 gas_after_mix = gasleft();
+        console.log("Gas for mixing felts into channel:", gas_before_mix - gas_after_mix);
 
+        uint256 gas_before_random2 = gasleft();
         QM31Field.QM31 memory randomCoeff2;
         randomCoeff2 = _channel.drawSecureFelt();
+        uint256 gas_after_random2 = gasleft();
+        console.log("Gas for drawing second random coefficient:", gas_before_random2 - gas_after_random2);
 
         // Generate bounds for FRI from commitment scheme
+        uint256 gas_before_bounds = gasleft();
         CirclePolyDegreeBound.Bound[] memory bounds = _commitmentScheme
             .calculateBounds();
+        uint256 gas_after_bounds = gasleft();
+        console.log("Gas for calculating FRI bounds:", gas_before_bounds - gas_after_bounds);
 
+        uint256 gas_before_fri_commit = gasleft();
         _friVerifier = FriVerifier.commit(
             _channel,
             _commitmentScheme.config.friConfig,
             proof.friProof,
             bounds
         );
+        uint256 gas_after_fri_commit = gasleft();
+        console.log("Gas for FRI verifier commit:", gas_before_fri_commit - gas_after_fri_commit);
         // =============================================================================
         // PHASE 7: Verify Proof of Work
         // =============================================================================
 
+        uint256 gas_before_pow = gasleft();
         bool powValid = _verifyProofOfWork(
             proof.proofOfWork,
             proof.config.powBits
         );
+        uint256 gas_after_pow = gasleft();
+        console.log("Gas for proof of work verification:", gas_before_pow - gas_after_pow);
+        
         require(powValid, "Proof of work verification failed");
         if (!powValid) {
+            console.log("Proof of work verification failed!");
             return false;
         }
 
         // mix pow nonce into channel
+        uint256 gas_before_mix_pow = gasleft();
         _channel.mixU64(proof.proofOfWork);
+        uint256 gas_after_mix_pow = gasleft();
+        console.log("Gas for mixing PoW nonce into channel:", gas_before_mix_pow - gas_after_mix_pow);
 
         // =============================================================================
         // Create PointSamples for FRI verification
         // =============================================================================
 
+        uint256 gas_before_zip = gasleft();
         // Rust: let samples = sampled_points.zip_cols(proof.sampled_values).map_cols(...)
         FriVerifier.PointSample[][][]
             memory pointSamples = _zipSamplePointsWithValues(
                 samplePoints,
                 proof.sampledValues
             );
+        uint256 gas_after_zip = gasleft();
+        console.log("Gas for zipping sample points with values:", gas_before_zip - gas_after_zip);
 
         // =============================================================================
         // PHASE 8: FRI Decommitment (PCS Verification)
         // =============================================================================
+        uint256 gas_before_fri = gasleft();
         bool friValid = _verifyFri(
             proof.friProof,
             proof.config.friConfig,
@@ -227,11 +279,19 @@ contract STWOVerifier {
             proof.queriedValues,
             randomCoeff2
         );
+        uint256 gas_after_fri = gasleft();
+        console.log("Gas for FRI verification (entire PCS):", gas_before_fri - gas_after_fri);
+        
         if (!friValid) {
+            console.log("FRI verification failed!");
             return false;
         }
 
         uint256 gas_end = gasleft();
+        uint256 total_gas_used = gas_start - gas_end;
+        console.log("=== VERIFICATION COMPLETE ===");
+        console.log("Total gas used for entire verification:", total_gas_used);
+        console.log("Final gas remaining:", gas_end);
 
         return true;
     }
@@ -246,6 +306,10 @@ contract STWOVerifier {
         uint256 nTrees,
         VerificationParams calldata params
     ) internal returns (ComponentsLib.TreeVecMaskPoints memory) {
+        console.log("--- Computing sample points ---");
+        uint256 gas_start_compute = gasleft();
+        
+        uint256 gas_before_alloc = gasleft();
         FrameworkComponentLib.ComponentState[] memory componentStates = new FrameworkComponentLib.ComponentState[](params.componentParams.length);
 
         // Initialize allocator (reset only if already initialized)
@@ -253,7 +317,10 @@ contract STWOVerifier {
             TraceLocationAllocatorLib.reset(_allocator);
         }
         TraceLocationAllocatorLib.initialize(_allocator);
+        uint256 gas_after_alloc = gasleft();
+        console.log("Gas for allocator initialization:", gas_before_alloc - gas_after_alloc);
         
+        uint256 gas_before_components = gasleft();
         for (uint256 i = 0; i < params.componentParams.length; i++) {
             // Reset allocator for each component to prevent accumulation
             if (i > 0) {
@@ -264,26 +331,40 @@ contract STWOVerifier {
             FrameworkComponentLib.ComponentState memory componentState = FrameworkComponentLib.createComponent(_allocator, params.componentParams[i].logSize, params.componentParams[i].claimedSum, params.componentParams[i].info);
             componentStates[i] = componentState;
         }
+        uint256 gas_after_components = gasleft();
+        console.log("Gas for creating component states:", gas_before_components - gas_after_components);
 
+        uint256 gas_before_init = gasleft();
         _components.initialize(componentStates, params.nPreprocessedColumns);
+        uint256 gas_after_init = gasleft();
+        console.log("Gas for components initialization:", gas_before_init - gas_after_init);
 
         // Step 1: Get mask points from each component
         // Rust: self.components.iter().map(|component| component.mask_points(point))
+        uint256 gas_before_mask_points = gasleft();
         FrameworkComponentLib.SamplePoints[] memory componentMaskPoints = _components.maskPoints(oodsPoint);
-        
+        uint256 gas_after_mask_points = gasleft();
+        console.log("Gas for getting mask points from components:", gas_before_mask_points - gas_after_mask_points);
 
         // Step 2: Concatenate columns (TreeVec::concat_cols)
+        uint256 gas_before_concat = gasleft();
         ComponentsLib.TreeVecMaskPoints memory maskPoints = _concatCols(componentMaskPoints);
+        uint256 gas_after_concat = gasleft();
+        console.log("Gas for concatenating columns:", gas_before_concat - gas_after_concat);
+        
         // Step 3: Handle preprocessed columns
         // Rust: let preprocessed_mask_points = &mut mask_points[PREPROCESSED_TRACE_IDX];
         // Rust: *preprocessed_mask_points = vec![vec![]; self.n_preprocessed_columns];
         // Calculate actual nPreprocessedColumns from componentStates
+        uint256 gas_before_preproc_calc = gasleft();
         uint256 actualPreprocessedColumns = 0;
         for (uint256 i = 0; i < componentStates.length; i++) {
             actualPreprocessedColumns += componentStates[i].preprocessedColumnIndices.length;
         }
         
         _initializePreprocessedColumns(maskPoints, params.nPreprocessedColumns);
+        uint256 gas_after_preproc_calc = gasleft();
+        console.log("Gas for preprocessed columns setup:", gas_before_preproc_calc - gas_after_preproc_calc);
 
         // Step 4: Set preprocessed column mask points to [point]
         // Rust: for component in &self.components {
@@ -291,9 +372,13 @@ contract STWOVerifier {
         //               preprocessed_mask_points[idx] = vec![point];
         //           }
         //       }
+        uint256 gas_before_set_preproc = gasleft();
         _setPreprocessedMaskPoints(componentStates, maskPoints, oodsPoint);
+        uint256 gas_after_set_preproc = gasleft();
+        console.log("Gas for setting preprocessed mask points:", gas_before_set_preproc - gas_after_set_preproc);
 
         // Add composition polynomial tree (SECURE_EXTENSION_DEGREE = 4 columns)
+        uint256 gas_before_composition = gasleft();
         CirclePoint.Point[][][] memory newPoints = new CirclePoint.Point[][][](
             nTrees + 1
         );
@@ -320,6 +405,12 @@ contract STWOVerifier {
         // Update maskPoints with composition tree
         maskPoints.points = newPoints;
         maskPoints.nColumnsPerTree = newNColumns;
+        uint256 gas_after_composition = gasleft();
+        console.log("Gas for adding composition tree:", gas_before_composition - gas_after_composition);
+        
+        uint256 gas_end_compute = gasleft();
+        console.log("Total gas for _computeSamplePoints:", gas_start_compute - gas_end_compute);
+        
         return maskPoints;
     }
 
@@ -641,51 +732,65 @@ contract STWOVerifier {
         uint32[][] memory queriedValues,
         QM31Field.QM31 memory randomCoeff
     ) internal returns (bool) {
+        console.log("--- Starting FRI verification ---");
+        uint256 gas_start_fri = gasleft();
+        
         // Get FRI query positions (equivalent to fri_verifier.sample_query_positions(channel))
+        uint256 gas_before_query_pos = gasleft();
         FriVerifier.QueryPositionsByLogSize memory queryPositions = _friVerifier
             .sampleQueryPositions(_channel);
+        uint256 gas_after_query_pos = gasleft();
+        console.log("Gas for sampling query positions:", gas_before_query_pos - gas_after_query_pos);
 
         // Verify merkle decommitments (equivalent to Rust tree verification loop)
         // self.trees.as_ref().zip_eq(proof.decommitments).zip_eq(proof.queried_values.clone())
         //     .map(|((tree, decommitment), queried_values)| tree.verify(...))
+        uint256 gas_before_merkle = gasleft();
         bool merkleVerificationSuccess = _verifyMerkleDecommitments(
             decommitments,
             queriedValues,
             queryPositions
         );
-
+        uint256 gas_after_merkle = gasleft();
+        console.log("Gas for Merkle decommitments verification:", gas_before_merkle - gas_after_merkle);
 
         if (!merkleVerificationSuccess) {
+            console.log("Merkle decommitments verification failed!");
             return false;
         }        
         // Answer FRI queries (equivalent to fri_answers call)
+        uint256 gas_before_columns_info = gasleft();
         uint32[][][] memory nColumnsPerLogSizeData = getNColumnsPerLogSize(
             _commitmentScheme
         );
         
-        
         uint32[][] memory commitmentColumnLogSizes = _commitmentScheme
             .columnLogSizes();
+        uint256 gas_after_columns_info = gasleft();
+        console.log("Gas for getting columns info:", gas_before_columns_info - gas_after_columns_info);
             
-        // QM31Field.QM31[][] memory friAnswersResult = FriVerifier.friAnswers(
-        //     commitmentColumnLogSizes,
-        //     pointSamples,
-        //     randomCoeff,
-        //     queryPositions,
-        //     queriedValues,
-        //     nColumnsPerLogSizeData
-        // );
+        QM31Field.QM31[][] memory friAnswersResult = FriVerifier.friAnswers(
+            commitmentColumnLogSizes,
+            pointSamples,
+            randomCoeff,
+            queryPositions,
+            queriedValues,
+            nColumnsPerLogSizeData
+        );
         
-        // console.log("friAnswers completed, friAnswersResult.length:", friAnswersResult.length);
+        console.log("friAnswers completed, friAnswersResult.length:", friAnswersResult.length);
 
-        // // FRI decommit verification
-        // console.log("About to call FriVerifier.decommit");
-        // bool decommitSuccess = FriVerifier.decommit(
-        //     _friVerifier,
-        //     friAnswersResult
-        // );
+        // FRI decommit verification
+        console.log("About to call FriVerifier.decommit");
+        bool decommitSuccess = FriVerifier.decommit(
+            _friVerifier,
+            friAnswersResult
+        );
 
-        return true;
+        uint256 gas_end_fri = gasleft();
+        console.log("Total gas for _verifyFri:", gas_start_fri - gas_end_fri);
+        
+        return decommitSuccess;
     }
 
     /// @notice External wrapper for MerkleVerifier.verify to enable try/catch

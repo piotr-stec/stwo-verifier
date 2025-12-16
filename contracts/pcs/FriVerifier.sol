@@ -290,15 +290,9 @@ library FriVerifier {
         if (proof.lastLayerPoly.length > maxLastLayerSize) {
             revert LastLayerDegreeInvalid();
         }
-
-        console.log("channel before mix felts");
-        console.logBytes32(channelState.digest);
-        // Mix last layer polynomial into channel
-
+        
         channelState.mixFelts(proof.lastLayerPoly);
 
-        console.log("channel after mix felts");
-        console.logBytes32(channelState.digest);
         // Initialize verifier state
         friVerifierState = FriVerifierState({
             config: config,
@@ -330,9 +324,6 @@ library FriVerifier {
         internal
         returns (QueryPositionsByLogSize memory queryPositionsByLogSize)
     {
-        console.log("=== sampleQueryPositions START ===");
-        console.log("Channel digest before sampling:");
-        console.logBytes32(channelState.digest);
         
         // Collect unique column log sizes (equivalent to Rust BTreeSet)
         uint32[] memory columnLogSizes = _getUniqueColumnLogSizes(
@@ -352,9 +343,6 @@ library FriVerifier {
             }
         }
 
-        console.log("maxColumnLogSize:", maxColumnLogSize);
-        console.log("nQueries:", friVerifierState.config.nQueries);
-
         // Generate queries (equivalent to Queries::generate)
         Queries memory queries = _generateQueries(
             channelState,
@@ -362,30 +350,19 @@ library FriVerifier {
             uint32(friVerifierState.config.nQueries)
         );
 
-        console.log("Generated queries.positions.length:", queries.positions.length);
-        console.log("First 10 query positions:");
-        for (uint256 i = 0; i < queries.positions.length && i < 10; i++) {
-            console.log("  query[", i, "]:", queries.positions[i]);
-        }
-
+ 
         // Get query positions by log size (equivalent to get_query_positions_by_log_size)
         queryPositionsByLogSize = _getQueryPositionsByLogSize(
             queries,
             columnLogSizes
         );
 
-        console.log("Query positions by log size:");
-        for (uint256 i = 0; i < queryPositionsByLogSize.logSizes.length; i++) {
-            console.log("  LogSize:", queryPositionsByLogSize.logSizes[i], 
-                       "Count:", queryPositionsByLogSize.queryPositions[i].length);
-        }
 
         // Store in verifier state
         friVerifierState.queries = queries;
         friVerifierState.queryPositionsByLogSize = queryPositionsByLogSize;
         friVerifierState.queriesSampled = true;
         
-        console.log("=== sampleQueryPositions END ===");
     }
 
     /// @notice Mix QM31 array into channel
@@ -1478,7 +1455,6 @@ library FriVerifier {
                 "FRI decommit failed at STEP 1: First layer verification failed"
             );
         }
-        console.log("first layer completed");
 
         // Step 2: Fold queries for inner layers (equivalent to queries.fold(CIRCLE_TO_LINE_FOLD_STEP))
         Queries memory innerLayerQueries = foldQueries(
@@ -1499,7 +1475,6 @@ library FriVerifier {
         if (!innerLayersSuccess) {
             revert("FRI decommit failed at STEP 3: Inner layers verification failed");
         }
-                console.log("inner layer completed");
 
         
 
@@ -1711,9 +1686,6 @@ library FriVerifier {
         // Sort queriesPerLogSize by logSize in ascending order to match Rust behavior
         _sortQueriesPerLogSizeAscending(queriesPerLogSize);
 
-
-        // console.log("Verfiingh first layer merkle proof");
-        
         // Verify Merkle proof
         MerkleVerifier.verify(
             verifier,
@@ -1765,7 +1737,7 @@ library FriVerifier {
         SparseEvaluation[] memory firstLayerSparseEvals
     )
         internal
-        pure
+        view
         returns (
             bool success,
             Queries memory lastLayerQueries,
@@ -1867,6 +1839,15 @@ library FriVerifier {
             "Not all sparse evals consumed"
         );
 
+        console.log("=== decommitInnerLayers END ===");
+        console.log("Final layerQueries.positions.length:", layerQueries.positions.length);
+        console.log("Final layerQueries.logDomainSize:", layerQueries.logDomainSize);
+        console.log("Final layerQueryEvals.length:", layerQueryEvals.length);
+        if (layerQueryEvals.length > 0) {
+            console.log("layerQueryEvals[0]:", layerQueryEvals[0].first.real, layerQueryEvals[0].first.imag);
+            console.log("                   ", layerQueryEvals[0].second.real, layerQueryEvals[0].second.imag);
+        }
+
         return (true, layerQueries, layerQueryEvals);
     }
 
@@ -1881,7 +1862,7 @@ library FriVerifier {
         FriVerifierState memory friVerifierState,
         Queries memory queries,
         QM31Field.QM31[] memory queryEvals
-    ) internal pure returns (bool success) {
+    ) internal view returns (bool success) {
         // Get last layer domain and polynomial
         // Rust: let Self { last_layer_domain: domain, last_layer_poly, .. } = self;
         uint32 lastLayerDomainLogSize = friVerifierState.lastLayerDomainLogSize;
@@ -1895,6 +1876,11 @@ library FriVerifier {
         for (uint256 i = 0; i < queries.positions.length; i++) {
             uint256 query = queries.positions[i];
             QM31Field.QM31 memory queryEval = queryEvals[i];
+            
+                // console.log("Query", i, "position:", query);
+                // console.log("  queryEval.first:", queryEval.first.real, queryEval.first.imag);
+                // console.log("  queryEval.second:", queryEval.second.real, queryEval.second.imag);
+            
 
             // Get domain point at bit-reversed query position
             // Rust: let x = domain.at(bit_reverse_index(query, domain.log_size()));
@@ -1904,6 +1890,7 @@ library FriVerifier {
                 query,
                 lastLayerDomainLogSize
             );
+
             CirclePointM31.Point memory circlePoint = CosetM31.at(domain, reversedIndex);
             uint32 x = circlePoint.x; // Extract x-coordinate (M31)
 
@@ -1922,7 +1909,7 @@ library FriVerifier {
                 return false; // LastLayerEvaluationsInvalid
             }
         }
-
+        
         return true;
     }
 
@@ -2378,9 +2365,11 @@ library FriVerifier {
         return (true, newQueries, newQueryEvals);
     }
 
-    /// @notice Evaluates a polynomial at a given point using Horner's method
+    /// @notice Evaluates a polynomial at a given point using hierarchical folding
     /// @dev Matches Rust LinePoly.eval_at_point(x: SecureField)
-    /// @param poly Polynomial coefficients in standard order
+    /// Uses ITERATIVE implementation to avoid expensive recursion in Solidity
+    /// Rust uses bit-reversed coefficients and hierarchical folding with doublings
+    /// @param poly Polynomial coefficients in bit-reversed order (as stored in LinePoly)
     /// @param x Evaluation point (QM31)
     /// @return result Polynomial evaluation result
     function evaluatePolynomialAtPoint(
@@ -2391,13 +2380,80 @@ library FriVerifier {
             return QM31Field.zero();
         }
 
-        // Use Horner's method: p(x) = a₀ + x(a₁ + x(a₂ + ...))
-        // Rust equivalent: coefficients are evaluated from highest to lowest degree
-        result = poly[poly.length - 1];
-
-        for (uint256 i = poly.length - 1; i > 0; i--) {
-            result = QM31Field.add(QM31Field.mul(result, x), poly[i - 1]);
+        // Rust: let mut doublings = Vec::new();
+        // for _ in 0..self.log_size {
+        //     doublings.push(x);
+        //     x = CirclePoint::double_x(x);
+        // }
+        uint32 logSize = _log2(poly.length);
+        QM31Field.QM31[] memory doublings = new QM31Field.QM31[](logSize);
+        
+        QM31Field.QM31 memory currentX = x;
+        for (uint256 i = 0; i < logSize; i++) {
+            doublings[i] = currentX;
+            // CirclePoint::double_x(x) = 2*x^2 - 1
+            QM31Field.QM31 memory xSquared = QM31Field.mul(currentX, currentX);
+            QM31Field.QM31 memory twoXSquared = QM31Field.add(xSquared, xSquared); // 2*x^2
+            currentX = QM31Field.sub(twoXSquared, QM31Field.one()); // 2*x^2 - 1
         }
+        
+        // Rust: fold(&self.coeffs, &doublings)
+        // ITERATIVE hierarchical folding (much cheaper than recursion in Solidity)
+        result = _foldPolynomialIterative(poly, doublings);
+    }
+    
+    /// @notice ITERATIVE hierarchical folding for polynomial evaluation
+    /// @dev Iterative version of Rust fold() - avoids expensive recursion
+    /// Processes folding factors from last to first (bottom-up)
+    /// fold(values, [x, y, z]) computes tree: ((a+z*b)+(c+z*d)*y)+((e+z*f)+(g+z*h)*y)*x
+    /// @param values Polynomial coefficients (bit-reversed)
+    /// @param foldingFactors Doubling sequence [x, double_x(x), ...]
+    /// @return result Folded result
+    function _foldPolynomialIterative(
+        QM31Field.QM31[] memory values,
+        QM31Field.QM31[] memory foldingFactors
+    ) private pure returns (QM31Field.QM31 memory result) {
+        uint256 n = values.length;
+        require(n == (1 << foldingFactors.length), "Invalid folding factors length");
+        
+        // Create working buffer - we'll fold in place
+        QM31Field.QM31[] memory buffer = new QM31Field.QM31[](n);
+        for (uint256 i = 0; i < n; i++) {
+            buffer[i] = values[i];
+        }
+        
+        // Process each folding factor from last to first (bottom-up)
+        // Level 0 (last factor): pairs of values
+        // Level 1: pairs of results from level 0
+        // etc.
+        uint256 currentSize = n;
+        for (uint256 level = foldingFactors.length; level > 0; level--) {
+            QM31Field.QM31 memory factor = foldingFactors[level - 1];
+            uint256 halfSize = currentSize / 2;
+            
+            // Fold pairs: buffer[i] = buffer[2*i] + buffer[2*i+1] * factor
+            for (uint256 i = 0; i < halfSize; i++) {
+                QM31Field.QM31 memory lhs = buffer[i * 2];
+                QM31Field.QM31 memory rhs = buffer[i * 2 + 1];
+                // lhs + rhs * factor
+                buffer[i] = QM31Field.add(lhs, QM31Field.mul(rhs, factor));
+            }
+            
+            currentSize = halfSize;
+        }
+        
+        return buffer[0];
+    }
+    
+    /// @notice Helper to calculate log2 of a power of 2
+    function _log2(uint256 n) private pure returns (uint32) {
+        require(n > 0 && (n & (n - 1)) == 0, "Not a power of 2");
+        uint32 log = 0;
+        while (n > 1) {
+            n >>= 1;
+            log++;
+        }
+        return log;
     }
 
     /// @notice Extract column log sizes from circle polynomial degree bounds
